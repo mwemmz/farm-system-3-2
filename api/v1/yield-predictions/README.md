@@ -1,0 +1,26 @@
+# Developer 1 Phase 4: yield prediction and analytics
+
+**This implementation is a historical/statistical estimator. It is not a trained AI or machine-learning model.** It uses completed harvest observations; soil, pest/disease, irrigation, and weather information is context only and never changes the estimate by an invented percentage.
+
+Migration `014_yield_predictions.sql` stores each estimate as a new historical row. No canonical Developer 3 `plantings` table exists on current master, so predictions use `field_id`, required `crop_name_snapshot`, and optional `variety_snapshot`. They do not create or alter crops, plantings, harvests, or factor-source records.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| POST | `yield-predictions/create.php` | Create an estimate from at least two comparable completed harvests |
+| GET | `yield-predictions/detail.php?id=1` | Stored estimate, statistics, and factor snapshot |
+| GET | `yield-predictions/list.php?field_id=1` | Historical estimates, newest first; optional `crop_name_snapshot` and `confidence_level` |
+| GET | `yield-predictions/compare.php?prediction_id=1&harvest_id=1` | Explicit predicted-versus-actual comparison |
+| GET | `yield-predictions/accuracy.php?field_id=1` | Explains why automatic aggregate accuracy is unavailable |
+| GET | `yield-predictions/field-analytics.php?field_id=1` | Production totals and separate crop yield statistics |
+
+Create JSON: `{ "field_id": 1, "crop_name_snapshot": "Maize", "variety_snapshot": "Optional", "target_area_hectares": 1.5 }`. Target area defaults to the field area; supplied area must be positive and no larger than the field. Crop matching trims outer whitespace, collapses internal whitespace, and compares case insensitively. Variety is contextual, not a sample filter. Only matching-field, matching-crop, completed harvests with an actual quantity and positive harvested area are samples. Genuine zero-yield harvests are included. Different fields and crops never contribute to the same estimate.
+
+With zero or one sample, create returns HTTP 200 with `status: insufficient_data`, `required_minimum: 2`, and `sample_count`; it inserts nothing. With two or more samples, each yield is `actual_quantity_kg / area_harvested_hectares`. The arithmetic mean of those per-harvest yields is `predicted_yield_kg_per_hectare`; `predicted_quantity_kg = mean × target_area_hectares`. The method identifier is `historical_mean_v1`. Minimum and maximum are individual sample yields. Standard deviation is the population standard deviation of observed yields: `sqrt(sum((yield - mean)^2) / sample_count)`. Coefficient of variation (CV) is `standard_deviation / mean × 100`; it is null when mean is zero. Stored DECIMAL values and API analysis are rounded to four decimal places. Unsupported numeric ranges return a client error instead of relying on MariaDB clamping.
+
+`confidence_level` is a descriptive **data-quality** label, never a probability. It is `low` for exactly two samples, an undefined CV, or CV above 30%; `high` for at least five samples with CV at most 20%; and `medium` for all remaining cases with at least three samples and CV at most 30%. These are declared review thresholds, not calibrated predictive probabilities. No trend adjustment is applied.
+
+The factor snapshot records the latest soil record for the field; scouting counts from the last 30 days for that field, including unresolved and high/critical reports; irrigation systems assigned to the field or farm-wide, recent logged water volume and issue count; and the latest weather row in the last 30 days for the field's farm. Missing sources produce explicit empty or limited-data context. Weather rows are farm-level, not field-level. These observations can inform human review but are **not causal coefficients** and do not alter the numeric estimate. The JSON snapshot preserves what was available when the prediction was made.
+
+Comparison requires explicit IDs for a prediction and completed harvest on the same field with the same normalized crop. `signed_error_kg = predicted - actual`; absolute error is its magnitude. Absolute percentage error is `absolute_error / actual × 100` when actual is positive, or null for zero actual. Yield-per-hectare values are compared too. A comparison never updates the stored prediction. The current schema has no reliable link between a prediction and a particular future harvest, so `accuracy.php` does not guess pairs or fabricate MAPE. Field analytics separate overall production/loss totals from crop-specific yield statistics and include zero-yield event counts and recent harvests; no cross-crop mean is presented as a prediction.
+
+All routes use `verifyJWT()` and the existing field-to-farm authorization helper. A prediction is authorized through its stored field; comparison authorizes both stored records. Creator ID comes from authentication, not request JSON. The current authentication implementation is Developer 4's stub, so real multi-user JWT authorization remains untested. This module reads but never writes soil, irrigation, scouting, weather, or harvest source tables. Inventory, storage, sales, revenue, finances, notifications, and weather ingestion remain outside Developer 1 Phase 4.
